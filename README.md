@@ -22,7 +22,20 @@
 ## Summary
 在 Tencent Cloud EdgeOne Pages (基于 SCF) 环境下部署 Next.js (App Router) 应用时，API Route 接收到的 `Request` 对象的 Body Stream 已经被提前消费 (Consumed/Drained)，导致应用层无法读取请求体。
 
-即使 `content-length` 标头显示请求体存在且非零，应用层调用 `request.text()` 仍返回空字符串，调用 `request.json()` 则抛出 `Body is unusable: Body has already been read` 错误。这表明平台的 Next.js 适配器在将请求传递给应用逻辑之前，已经消耗了 Body 流且未正确重置。
+### 关键现象与复现条件
+*   **环境差异**：该 Bug **仅在生产环境**复现，本地开发环境（`npm run dev` / `start`）一切正常。
+*   **调试困境**：目前的开发体验非常痛苦，因为无法在本地模拟生产环境的边缘行为。强烈建议官方提供一个能够完全模拟 EdgeOne Pages 生产环境（包括 SCF 适配器行为）的本地 Docker 镜像或 CLI 工具，避免开发者只能通过反复部署到云端来 Debug。
+*   **受影响接口**：所有被 Next.js App Router 包装的 API 接口（如 `/api/auth/login`, `/api/send` 等）。
+*   **具体表现**：只要请求方法为 **POST**，无论 Headers 如何设置或 Body 是否有值，Next.js 业务层收到的 Request Body **始终为空**。
+*   **代码隔离测试**：如果在非 EdgeOne 部署的 Next.js 环境中单独提取并运行相同的 Body 读取逻辑（包括 `req.clone()`, `req.text()`, `req.json()`），均能正常工作。这进一步证实了问题出在 EdgeOne Pages 的运行时适配器层，而非用户代码逻辑。
+*   **推测原因**：怀疑是 EdgeOne Pages 在处理 Next.js 高级特性（如 SSR/RSC）的请求透传逻辑中，与其他模块协作时发生了冲突，导致传递给业务层的 Request Stream 已经是“死流”（Drained Stream）。
+
+### 关于 Rewrites/Redirects 支持的变更
+文档 [EdgeOne Pages Next.js 指南](https://pages.edgeone.ai/zh/document/framework-nextjs) 中曾提到 **“目前暂不支持 Next.js 的重写和重定向”**。但实测发现，目前生产环境似乎已经支持了这些特性。
+**值得注意的是**：在该项目正常运行的旧版本时期，这些特性确实是不支持的。请 EdgeOne 开发团队审查最近关于 Rewrites/Redirects 支持的代码提交，这可能是导致 Body Stream 异常的副作用来源。
+
+## Temporary Workaround
+作为临时解决方案，本项目（Umami EdgeOne 移植版）已被迫**将所有关键的 POST 接口修改为 GET 接口**以绕过此 Bug。这虽然能让服务跑通，但破坏了 RESTful 规范且存在安全隐患，急需官方修复。
 
 ## Environment
 - **Platform**: Tencent Cloud EdgeOne Pages (Serverless Cloud Function / SCF)
@@ -119,7 +132,7 @@ curl -X POST "https://your-site.edgeone.cool/api/debug-poc" \
 2.  或者，确保使用 `stream.tee()` 来保留流的可读性。
 
 ### 立即可以进行的 POC 测试并获取详细调试信息（针对当前仓库最新提交）
-```curl
+```bash
 curl -X POST "https://eo-umami.acofork.com/api/debug-poc" \
      -H "Content-Type: application/json" \
      -d '{"test": "hello edgeone", "timestamp": 123456}'
